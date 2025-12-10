@@ -7,7 +7,7 @@ from docx.oxml.ns import qn
 from io import BytesIO
 
 # ==========================================
-# 1. 数据库配置与工具函数 (持久化核心)
+# 1. 数据库配置与工具函数
 # ==========================================
 
 DB_FILE = "fire_inspections.db"
@@ -75,10 +75,18 @@ def get_items_by_project(project_name):
     return data_list
 
 def delete_item_from_db(item_id):
-    """根据ID删除记录"""
+    """根据ID删除单条问题记录"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("DELETE FROM inspections WHERE id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+
+def delete_project_from_db(project_name):
+    """[新增] 删除整个项目的所有记录"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM inspections WHERE project_name = ?", (project_name,))
     conn.commit()
     conn.close()
 
@@ -86,7 +94,7 @@ def delete_item_from_db(item_id):
 init_db()
 
 # ==========================================
-# 2. Word 生成逻辑
+# 2. Word 生成逻辑 (保持不变)
 # ==========================================
 def set_font(run, font_name='宋体', size=10, bold=False):
     run.font.name = font_name
@@ -174,42 +182,72 @@ st.set_page_config(page_title="消防检查助手", layout="centered")
 
 # --- 状态管理与数据加载逻辑 ---
 
-# 1. 初始化 Session
 if 'current_report_name' not in st.session_state:
     st.session_state.current_report_name = "默认项目"
 
-# 2. 读取数据库里的项目
+# 读取数据库里的项目
 db_projects = get_all_projects()
 
-# 3. [关键修复]：确保当前选中的项目出现在下拉列表中
-# 如果当前名为 "新建项目A"，但数据库还没存数据，db_projects 里是没有的。
-# 我们手动把它临时加进去，防止 UI 把它重置回 "默认项目"。
+# 确保当前项目在列表中
 current_name = st.session_state.current_report_name
 if current_name not in db_projects:
     db_projects.insert(0, current_name)
 
-# --- 顶部：项目切换 ---
-with st.expander(f"📂 当前项目：{current_name} (点击切换)", expanded=False):
-    # 选择框
-    selected_report = st.selectbox(
-        "选择现有项目",
-        db_projects,
-        index=db_projects.index(current_name)
-    )
+# --- 顶部：项目管理区域 ---
+with st.expander(f"📂 当前项目：{current_name} (点击切换/删除)", expanded=False):
 
-    if selected_report != current_name:
-        st.session_state.current_report_name = selected_report
-        st.rerun()
+    # 使用 Tabs 分割“切换/新建”和“删除”功能，界面更整洁
+    tab_switch, tab_manage = st.tabs(["🔁 切换或新建", "⚠️ 删除项目"])
 
-    # 新建逻辑
-    new_report_name = st.text_input("新建项目名称", placeholder="输入新项目名 (如：万达广场)")
-    if st.button("新建并切换"):
-        if new_report_name and new_report_name.strip():
-            # 这里只更新 Session，页面刷新后，上面的 [关键修复] 逻辑会接管它
-            st.session_state.current_report_name = new_report_name.strip()
+    # --- Tab 1: 切换与新建 ---
+    with tab_switch:
+        # 选择框
+        selected_report = st.selectbox(
+            "选择现有项目",
+            db_projects,
+            index=db_projects.index(current_name)
+        )
+
+        if selected_report != current_name:
+            st.session_state.current_report_name = selected_report
             st.rerun()
+
+        st.write("---")
+        # 新建项目逻辑
+        col_new_1, col_new_2 = st.columns([3, 1])
+        with col_new_1:
+            new_report_name = st.text_input("新建项目名称", placeholder="输入项目名 (如：万达广场)", label_visibility="collapsed")
+        with col_new_2:
+            if st.button("新建并切换"):
+                if new_report_name and new_report_name.strip():
+                    st.session_state.current_report_name = new_report_name.strip()
+                    st.rerun()
+                else:
+                    st.warning("名称不能为空")
+
+    # --- Tab 2: 删除项目 (新增功能) ---
+    with tab_manage:
+        st.write(f"正在管理：**{current_name}**")
+
+        if current_name == "默认项目":
+            st.info("🚫 【默认项目】是系统保留项，不可删除。")
         else:
-            st.warning("项目名称不能为空")
+            # 防误删机制：先勾选，再显示删除按钮
+            confirm_del = st.checkbox(f"我确认要删除项目【{current_name}】及其所有数据", key="del_chk")
+
+            if confirm_del:
+                if st.button("🗑️ 确认彻底删除", type="primary"):
+                    # 1. 从数据库删除数据
+                    delete_project_from_db(current_name)
+
+                    # 2. 状态重置：删除后回到“默认项目”或列表里的第一个
+                    remaining = [p for p in db_projects if p != current_name]
+                    fallback_project = remaining[0] if remaining else "默认项目"
+
+                    st.session_state.current_report_name = fallback_project
+
+                    st.success(f"项目 {current_name} 已删除！")
+                    st.rerun()
 
 # --- 加载当前项目数据 ---
 current_list = get_items_by_project(current_name)
@@ -247,7 +285,6 @@ with st.container(border=True):
                 final_img = camera_file if camera_file else uploaded_file
                 img_data = final_img.getvalue() if final_img else None
 
-                # 写入数据库 (此时 "新建项目" 这个名字才真正被写入 DB)
                 add_item_to_db(current_name, category, location, desc, remark, img_data if img_data else b'')
 
                 st.success("已保存！")
@@ -279,7 +316,6 @@ else:
                 if item['remark']:
                     st.caption(f"备注: {item['remark']}")
             with col_foot_2:
-                # 删除按钮 (使用数据库ID)
                 if st.button("🗑️", key=f"del_{item['id']}"):
                     delete_item_from_db(item['id'])
                     st.rerun()
@@ -288,7 +324,6 @@ else:
 st.markdown("---")
 
 if current_list:
-    # 列表反转供报告使用(让最早的问题排在1号)
     doc_object = create_word_file(current_name, current_list[::-1])
     output_buffer = BytesIO()
     doc_object.save(output_buffer)
