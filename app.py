@@ -6,7 +6,9 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from io import BytesIO
 
-# --- 数据库配置与工具函数 ---
+# ==========================================
+# 1. 数据库配置与工具函数 (持久化核心)
+# ==========================================
 
 DB_FILE = "fire_inspections.db"
 
@@ -14,7 +16,6 @@ def init_db():
     """初始化数据库表"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 创建表：包含自增ID、项目名、相关字段和图片二进制数据
     c.execute('''
               CREATE TABLE IF NOT EXISTS inspections (
                                                          id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,19 +54,18 @@ def add_item_to_db(project, category, loc, desc, remark, img_bytes):
     conn.close()
 
 def get_items_by_project(project_name):
-    """获取指定项目的所有记录 (按时间倒序，最新的在最前)"""
+    """获取指定项目的所有记录 (按时间倒序)"""
     conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row # 让结果可以通过列名访问
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("SELECT * FROM inspections WHERE project_name = ? ORDER BY id DESC", (project_name,))
     rows = c.fetchall()
     conn.close()
 
-    # 将 sqlite3.Row 对象转换为字典列表，兼容之前的逻辑
     data_list = []
     for row in rows:
         data_list.append({
-            "id": row["id"], # 用于删除
+            "id": row["id"],
             "category": row["category"],
             "desc": row["desc"],
             "loc": row["loc"],
@@ -82,10 +82,12 @@ def delete_item_from_db(item_id):
     conn.commit()
     conn.close()
 
-# 初始化数据库
+# 启动时确保数据库存在
 init_db()
 
-# --- 核心逻辑：生成 Word 文档 (保持不变) ---
+# ==========================================
+# 2. Word 生成逻辑
+# ==========================================
 def set_font(run, font_name='宋体', size=10, bold=False):
     run.font.name = font_name
     run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
@@ -165,43 +167,51 @@ def create_word_file(report_name, data_list):
 
     return doc
 
-# --- 页面 UI 逻辑 ---
+# ==========================================
+# 3. 页面 UI 与交互逻辑
+# ==========================================
 st.set_page_config(page_title="消防检查助手", layout="centered")
 
-# --- 状态管理 ---
+# --- 状态管理与数据加载逻辑 ---
+
+# 1. 初始化 Session
 if 'current_report_name' not in st.session_state:
     st.session_state.current_report_name = "默认项目"
 
-# 获取数据库中的项目列表
+# 2. 读取数据库里的项目
 db_projects = get_all_projects()
-# 确保当前选中的项目在列表中，否则重置为第一个
-if st.session_state.current_report_name not in db_projects:
-    if "默认项目" not in db_projects:
-        # 如果是刚开始没有任何项目，列表中至少有默认项目
-        pass
-    else:
-        st.session_state.current_report_name = db_projects[0]
 
+# 3. [关键修复]：确保当前选中的项目出现在下拉列表中
+# 如果当前名为 "新建项目A"，但数据库还没存数据，db_projects 里是没有的。
+# 我们手动把它临时加进去，防止 UI 把它重置回 "默认项目"。
 current_name = st.session_state.current_report_name
+if current_name not in db_projects:
+    db_projects.insert(0, current_name)
 
 # --- 顶部：项目切换 ---
 with st.expander(f"📂 当前项目：{current_name} (点击切换)", expanded=False):
-    # 选择框直接使用数据库里的项目名
-    selected_report = st.selectbox("选择已有项目", db_projects, index=db_projects.index(current_name) if current_name in db_projects else 0)
+    # 选择框
+    selected_report = st.selectbox(
+        "选择现有项目",
+        db_projects,
+        index=db_projects.index(current_name)
+    )
 
     if selected_report != current_name:
         st.session_state.current_report_name = selected_report
         st.rerun()
 
+    # 新建逻辑
     new_report_name = st.text_input("新建项目名称", placeholder="输入新项目名 (如：万达广场)")
     if st.button("新建并切换"):
-        if new_report_name:
-            # 新建时，我们不需要立刻往数据库建表，
-            # 只要切换了名字，下次添加问题时就会自动关联这个新名字
-            st.session_state.current_report_name = new_report_name
+        if new_report_name and new_report_name.strip():
+            # 这里只更新 Session，页面刷新后，上面的 [关键修复] 逻辑会接管它
+            st.session_state.current_report_name = new_report_name.strip()
             st.rerun()
+        else:
+            st.warning("项目名称不能为空")
 
-# --- 从数据库加载当前项目的数据 ---
+# --- 加载当前项目数据 ---
 current_list = get_items_by_project(current_name)
 
 # --- 核心区域：添加问题 ---
@@ -209,7 +219,13 @@ st.markdown("### 📸 现场录入")
 
 with st.container(border=True):
     with st.form("mobile_add_form", clear_on_submit=True):
-        location = st.text_input("📍 问题位置", placeholder="如：8楼楼梯间")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            location = st.text_input("📍 问题位置", placeholder="如：8楼楼梯间")
+        with col2:
+            st.write("") # 占位
+            st.caption(f"当前: {current_name}")
+
         category = st.radio("⚠️ 问题类别", ["建筑防火问题清单", "消防设施问题清单"], horizontal=True)
         desc = st.text_area("📝 问题描述", placeholder="描述具体隐患...", height=100)
 
@@ -231,10 +247,10 @@ with st.container(border=True):
                 final_img = camera_file if camera_file else uploaded_file
                 img_data = final_img.getvalue() if final_img else None
 
-                # --- 修改点：写入数据库 ---
+                # 写入数据库 (此时 "新建项目" 这个名字才真正被写入 DB)
                 add_item_to_db(current_name, category, location, desc, remark, img_data if img_data else b'')
 
-                st.success("已保存到数据库！")
+                st.success("已保存！")
                 st.rerun()
 
 # --- 列表展示区 ---
@@ -242,7 +258,7 @@ st.markdown("---")
 st.markdown(f"### 📋 已记录 ({len(current_list)})")
 
 if not current_list:
-    st.info("当前项目暂无记录，请在上方添加。")
+    st.info(f"项目【{current_name}】暂无记录，请在上方添加。")
 else:
     for item in current_list:
         with st.container(border=True):
@@ -263,29 +279,31 @@ else:
                 if item['remark']:
                     st.caption(f"备注: {item['remark']}")
             with col_foot_2:
-                # --- 修改点：删除时使用数据库ID ---
-                # 使用 key 防止按钮ID重复
+                # 删除按钮 (使用数据库ID)
                 if st.button("🗑️", key=f"del_{item['id']}"):
                     delete_item_from_db(item['id'])
                     st.rerun()
 
 # --- 底部：下载区域 ---
 st.markdown("---")
-# 生成 Word 时需要反转列表，因为数据库查出来是 "最新在最前"，
-# 但 Word 报告里通常希望序号 1 对应 "最早发现的问题"
-doc_object = create_word_file(current_name, current_list[::-1])
-output_buffer = BytesIO()
-doc_object.save(output_buffer)
-output_buffer.seek(0)
 
-st.download_button(
-    label="📥 生成并下载 Word 报告",
-    data=output_buffer,
-    file_name=f"{current_name}_消防问题清单.docx",
-    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    use_container_width=True,
-    type="primary"
-)
+if current_list:
+    # 列表反转供报告使用(让最早的问题排在1号)
+    doc_object = create_word_file(current_name, current_list[::-1])
+    output_buffer = BytesIO()
+    doc_object.save(output_buffer)
+    output_buffer.seek(0)
+
+    st.download_button(
+        label="📥 生成并下载 Word 报告",
+        data=output_buffer,
+        file_name=f"{current_name}_消防问题清单.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        use_container_width=True,
+        type="primary"
+    )
+else:
+    st.caption("暂无数据可下载")
 
 st.write("")
 st.write("")
